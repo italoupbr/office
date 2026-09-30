@@ -14,6 +14,9 @@ export default function PhaserGame() {
     const parent = hostRef.current
     if (!parent) return
 
+    // O WebGL não aceita framebuffer 0x0: sem tamanho inicial explícito, um
+    // boot antes do layout resolver derruba o renderer.
+    const rect = parent.getBoundingClientRect()
     const game = new Phaser.Game({
       type: Phaser.AUTO,
       parent,
@@ -23,6 +26,8 @@ export default function PhaserGame() {
       scale: {
         mode: Phaser.Scale.RESIZE,
         autoCenter: Phaser.Scale.NO_CENTER,
+        width: Math.max(320, Math.floor(rect.width) || window.innerWidth),
+        height: Math.max(240, Math.floor(rect.height) || window.innerHeight),
       },
       physics: {
         default: 'arcade',

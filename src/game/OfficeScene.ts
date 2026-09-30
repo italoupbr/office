@@ -50,6 +50,7 @@ export class OfficeScene extends Phaser.Scene {
   private currentRoom: RoomId | null = null
   private selectedDeskId: string | null = null
   private unsubscribe: (() => void)[] = []
+  private torndown = false
 
   constructor() {
     super('office')
@@ -252,15 +253,22 @@ export class OfficeScene extends Phaser.Scene {
       bus.on('camera:command', (command) => this.runCameraCommand(command)),
     )
 
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+    // game.destroy() emite DESTROY, e não SHUTDOWN. Sem ouvir os dois, a cena
+    // descartada pelo StrictMode continuaria assinada no bus e quebraria os
+    // comandos da cena viva.
+    const release = () => {
+      this.torndown = true
       this.unsubscribe.forEach((off) => off())
       this.unsubscribe = []
-    })
+    }
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, release)
+    this.events.once(Phaser.Scenes.Events.DESTROY, release)
   }
 
   // ------------------------------------------------------------- estado
 
   private applySummaries(summaries: DeskSummary[]): void {
+    if (this.torndown) return
     const byDesk = new Map(summaries.map((s) => [s.deskId, s]))
 
     for (const [deskId, view] of this.deskViews) {
@@ -290,6 +298,7 @@ export class OfficeScene extends Phaser.Scene {
   }
 
   private drawSelection(deskId: string | null): void {
+    if (this.torndown) return
     this.selectedDeskId = deskId
     this.selection.clear()
     if (!deskId) return
@@ -310,6 +319,7 @@ export class OfficeScene extends Phaser.Scene {
   }
 
   private runCameraCommand(command: bus.CameraCommand): void {
+    if (this.torndown) return
     const cam = this.cameras.main
 
     if (command === 'overview') {
