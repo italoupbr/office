@@ -1,116 +1,176 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import PhaserGame from './game/PhaserGame'
+import type { WorldSpec } from './game/OfficeScene'
 import * as bus from './game/bus'
-import { DESK_BY_ID, ROOM_BY_ID } from './game/layout'
-import TopBar from './components/TopBar'
-import DeskPanel from './components/DeskPanel'
-import DirectoryBoard from './components/DirectoryBoard'
-import StatusLegend from './components/StatusLegend'
-import { useOfficeData } from './hooks/useOfficeData'
-import { isOverdue } from './lib/status'
-import type { DeskSummary, RoomId } from './types'
+import { useViewMode } from './auth/viewModeContext'
+import { visibleBuildings, visibleRooms } from './auth/permissions'
+import { officeData } from './data/source'
+import DevBar from './components/DevBar'
+import type { Client, RoomId } from './types'
 
 export default function App() {
-  const [selectedClientId, setSelectedClientId] = useState<string | null>(null)
-  const [selectedDeskId, setSelectedDeskId] = useState<string | null>(null)
-  const [currentRoom, setCurrentRoom] = useState<RoomId | null>(null)
-  const [camera, setCamera] = useState<bus.CameraState>({ zoom: 1.5, mode: 'follow' })
+  const { mode } = useViewMode()
+  const [clients, setClients] = useState<Client[]>([])
+  const [requestedBuilding, setRequestedBuilding] = useState<string | null>(null)
+  const [openRoom, setOpenRoom] = useState<RoomId | null>(null)
+  const [camera, setCamera] = useState<bus.CameraState>({ zoom: 1, mode: 'follow' })
 
-  const { clients, items, clientById, memberById, itemsByDesk, ready } =
-    useOfficeData(selectedClientId)
+  const buildings = useMemo(() => visibleBuildings(mode), [mode])
 
-  // Phaser -> React
+  useEffect(() => {
+    officeData.listClients(mode).then(setClients)
+  }, [mode])
+
+  /**
+   * O prédio aberto é derivado, não guardado. Trocar de modo troca o conjunto
+   * visível, e um id fora do escopo simplesmente deixa de resolver em vez de
+   * ficar preso no estado.
+   */
+  const building = useMemo(() => {
+    const requested = buildings.find((b) => b.id === requestedBuilding)
+    if (requested) return requested
+    return buildings.find((b) => b.kind === 'client') ?? buildings[0] ?? null
+  }, [buildings, requestedBuilding])
+
+  const rooms = useMemo(
+    () => (building ? visibleRooms(mode, building.kind) : []),
+    [mode, building],
+  )
+
+  const world = useMemo<WorldSpec>(
+    () => ({ rooms, label: building?.name ?? '' }),
+    [rooms, building],
+  )
+
   useEffect(() => {
     const offs = [
-      bus.on('desk:click', (deskId) => setSelectedDeskId(deskId)),
-      bus.on('room:enter', (roomId) => setCurrentRoom(roomId)),
-      bus.on('camera:state', (state) => setCamera(state)),
+      bus.on('room:open', (roomId) => setOpenRoom(roomId)),
+      bus.on('camera:state', setCamera),
     ]
     return () => offs.forEach((off) => off())
   }, [])
 
-  // React -> Phaser: agregado por mesa, já filtrado por cliente
-  const summaries = useMemo<DeskSummary[]>(
-    () =>
-      [...itemsByDesk.entries()].map(([deskId, deskItems]) => ({
-        deskId,
-        total: deskItems.length,
-        overdue: deskItems.filter(isOverdue).length,
-        statuses: deskItems.map((item) => item.status),
-      })),
-    [itemsByDesk],
-  )
-
   useEffect(() => {
-    if (!ready) return
-    bus.emit('desks:update', summaries)
-  }, [summaries, ready])
+    bus.emit('room:highlight', openRoom)
+  }, [openRoom])
 
-  useEffect(() => {
-    bus.emit('desk:selected', selectedDeskId)
-  }, [selectedDeskId])
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setSelectedDeskId(null)
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
-
-  const closeDesk = useCallback(() => setSelectedDeskId(null), [])
-  const zoomIn = useCallback(() => bus.emit('camera:command', 'zoom-in'), [])
-  const zoomOut = useCallback(() => bus.emit('camera:command', 'zoom-out'), [])
-  const toggleOverview = useCallback(() => {
-    bus.emit('camera:command', camera.mode === 'overview' ? 'follow' : 'overview')
-  }, [camera.mode])
-
-  const selectedClientName = selectedClientId
-    ? clientById.get(selectedClientId)?.name ?? null
-    : null
-  const scopeLabel = selectedClientName ? `Filtro: ${selectedClientName}` : 'Todos os clientes'
-
-  const desk = selectedDeskId ? DESK_BY_ID[selectedDeskId] : null
-  const deskRoom = desk ? ROOM_BY_ID[desk.roomId] : null
-  const deskItems = selectedDeskId ? itemsByDesk.get(selectedDeskId) ?? [] : []
-  const overdueTotal = items.filter(isOverdue).length
+  const openRoomDef = rooms.find((room) => room.id === openRoom) ?? null
 
   return (
     <div className="app">
-      <TopBar
-        clients={clients}
-        selectedClientId={selectedClientId}
-        onSelectClient={setSelectedClientId}
-        zoom={camera.zoom}
-        cameraMode={camera.mode}
-        onZoomIn={zoomIn}
-        onZoomOut={zoomOut}
-        onToggleOverview={toggleOverview}
-        totalItems={items.length}
-        overdueItems={overdueTotal}
-      />
+      <header className="topbar">
+        <div className="topbar__brand">
+          <span className="topbar__mark" aria-hidden="true" />
+          <div>
+            <strong>Upsend</strong>
+            <span className="topbar__subtitle">
+              {mode.kind === 'agency' ? 'Modo agência' : 'Modo cliente'}
+            </span>
+          </div>
+        </div>
+
+        <label className="field">
+          <span className="field__label">Prédio</span>
+          <select
+            className="field__control"
+            value={building?.id ?? ''}
+            onChange={(event) => setRequestedBuilding(event.target.value)}
+          >
+            {buildings.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.kind === 'upsend' ? 'Upsend (operação interna)' : option.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="topbar__group topbar__group--end">
+          <div className="zoom">
+            <button
+              type="button"
+              className="btn btn--icon"
+              onClick={() => bus.emit('camera:command', 'zoom-out')}
+              aria-label="Reduzir zoom"
+            >
+              -
+            </button>
+            <span className="zoom__value">{Math.round(camera.zoom * 100)}%</span>
+            <button
+              type="button"
+              className="btn btn--icon"
+              onClick={() => bus.emit('camera:command', 'zoom-in')}
+              aria-label="Aumentar zoom"
+            >
+              +
+            </button>
+          </div>
+          <button
+            type="button"
+            className={`btn${camera.mode === 'overview' ? ' btn--active' : ''}`}
+            onClick={() =>
+              bus.emit('camera:command', camera.mode === 'overview' ? 'follow' : 'overview')
+            }
+          >
+            {camera.mode === 'overview' ? 'Seguir personagem' : 'Visão geral'}
+          </button>
+        </div>
+      </header>
 
       <main className="stage">
-        <PhaserGame />
+        <PhaserGame world={world} />
 
-        {currentRoom === 'diretoria' && (
-          <DirectoryBoard items={items} scopeLabel={scopeLabel} />
+        <nav className="rail">
+          <span className="rail__title">Salas visíveis</span>
+          <ul className="rail__list">
+            {rooms.map((room) => (
+              <li key={room.id}>
+                <button
+                  type="button"
+                  className={`rail__item${openRoom === room.id ? ' rail__item--on' : ''}`}
+                  onClick={() => {
+                    setOpenRoom(room.id)
+                    bus.emit('room:goto', room.id)
+                  }}
+                >
+                  <span className="rail__dot" style={{ background: room.accent }} aria-hidden="true" />
+                  <span>
+                    {room.name}
+                    {room.scope === 'internal' && <em className="rail__tag">interna</em>}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="rail__note">
+            {rooms.length} {rooms.length === 1 ? 'sala' : 'salas'} construídas no mapa.
+          </p>
+        </nav>
+
+        {openRoomDef && (
+          <aside className="panel panel--stub">
+            <header className="panel__head">
+              <div>
+                <span className="panel__eyebrow" style={{ color: openRoomDef.accent }}>
+                  {openRoomDef.scope === 'internal' ? 'Sala interna' : 'Acompanhamento'}
+                </span>
+                <h2 className="panel__title">{openRoomDef.name}</h2>
+                <p className="panel__meta">{openRoomDef.purpose}</p>
+              </div>
+              <button type="button" className="btn btn--ghost" onClick={() => setOpenRoom(null)}>
+                Fechar
+              </button>
+            </header>
+            <div className="panel__body">
+              <p className="panel__empty">
+                A interface desta sala entra na etapa 4. Nesta etapa o que existe é a
+                estrutura de dados, a regra de permissão e a barra de modo.
+              </p>
+            </div>
+          </aside>
         )}
-
-        {desk && deskRoom && (
-          <DeskPanel
-            desk={desk}
-            room={deskRoom}
-            items={deskItems}
-            clientById={clientById}
-            memberById={memberById}
-            clientFilterName={selectedClientName}
-            onClose={closeDesk}
-          />
-        )}
-
-        <StatusLegend />
       </main>
+
+      <DevBar clients={clients} />
     </div>
   )
 }

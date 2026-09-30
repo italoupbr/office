@@ -1,4 +1,4 @@
-import type { DeskSummary, RoomId } from '../types'
+import type { RoomBadge, RoomId } from '../types'
 
 export type CameraCommand = 'zoom-in' | 'zoom-out' | 'overview' | 'follow'
 
@@ -13,13 +13,16 @@ export interface CameraState {
  */
 export interface BusEvents {
   // React -> Phaser
-  'desks:update': DeskSummary[]
-  'desk:selected': string | null
+  'rooms:badges': RoomBadge[]
+  'room:highlight': RoomId | null
+  /** manda o personagem até a sala, com transição curta */
+  'room:goto': RoomId
   'camera:command': CameraCommand
   // Phaser -> React
-  'desk:click': string
+  'room:open': RoomId
   'room:enter': RoomId | null
   'camera:state': CameraState
+  'scene:ready': { rooms: RoomId[] }
 }
 
 type EventKey = keyof BusEvents
@@ -27,11 +30,11 @@ type Listener<K extends EventKey> = (payload: BusEvents[K]) => void
 type StoredListener = (payload: unknown) => void
 
 /**
- * Eventos retidos: o último valor é reenviado a quem assinar depois.
- * A cena Phaser nasce depois do primeiro render do React, então sem isso
- * ela perderia o estado inicial das mesas.
+ * Eventos retidos: o último valor é reenviado a quem assinar depois. A cena
+ * Phaser nasce depois do primeiro render do React, então sem isso ela perderia
+ * o estado inicial das placas.
  */
-const LATCHED: EventKey[] = ['desks:update', 'desk:selected']
+const LATCHED: EventKey[] = ['rooms:badges', 'room:highlight']
 
 const listeners = new Map<EventKey, Set<StoredListener>>()
 const latest = new Map<EventKey, unknown>()

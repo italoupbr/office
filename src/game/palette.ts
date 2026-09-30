@@ -1,5 +1,3 @@
-import type { RoomId } from '../types'
-
 /** Paleta única do mapa. Tons dessaturados para o pixel art ficar coeso. */
 export const PALETTE = {
   exterior: '#0d1014',
@@ -65,17 +63,16 @@ export const PALETTE = {
   dropShadow: 'rgba(11,14,19,0.32)',
 } as const
 
-/** Cor de identidade de cada sala. Usada em piso, placa e telas das mesas. */
-export const ROOM_ACCENT: Record<RoomId, string> = {
-  recepcao: '#3d8f8a',
-  conteudo: '#c2803f',
-  sites: '#4a7fb5',
-  seo_local: '#5b9b4d',
-  midia_paga: '#a8524f',
-  revisao: '#8a6bb0',
-  reuniao: '#3f829e',
-  diretoria: '#b08a2e',
-}
+/** Identidade Upsend, usada nos painéis React e em detalhes do mapa. */
+export const UPSEND = {
+  blue: '#425D80',
+  blueBright: '#328FF8',
+  mist: '#EDF1FA',
+  mistCard: '#DFE7F8',
+  gradientFrom: '#405A7B',
+  gradientTo: '#2E3F54',
+  text: '#304763',
+} as const
 
 export function toNum(hex: string): number {
   return parseInt(hex.slice(1), 16)

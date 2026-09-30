@@ -1,223 +1,198 @@
 import Phaser from 'phaser'
-import type { DeskSummary, RoomId } from '../types'
-import { STATUS_COLOR } from '../lib/status'
+import type { RoomDef, RoomId } from '../types'
 import * as bus from './bus'
 import {
-  DECOR,
-  DESKS,
-  MAP_H,
-  MAP_W,
-  ROOMS,
   SOLID_TILES,
-  SPAWN,
   TILE,
-  buildTileGrid,
+  buildFloorPlan,
   roomAtPixel,
-  type DeskDef,
+  type FloorPlan,
+  type RoomPlacement,
 } from './layout'
 import { PALETTE, toNum } from './palette'
 import {
   HERO_DIRS,
+  SIGN_H,
   TEX,
   buildTextures,
-  markerSlot,
-  paperSlot,
+  dropPlanTextures,
   type HeroDir,
 } from './textures'
-
-const ZOOM_STEPS = [0.6, 0.8, 1, 1.25, 1.5, 2]
-const DEFAULT_ZOOM = 4
-const SPEED = 175
-const MAX_PAPERS = 3
-
-interface DeskView {
-  def: DeskDef
-  body: Phaser.Physics.Arcade.Image
-  papers: Phaser.GameObjects.Image[]
-  extra: Phaser.GameObjects.Text
-  marker: Phaser.GameObjects.Image
+const ZOOM_STEPS = [0.7, 0.85, 1, 1.2, 1.45, 1.8]
+const DEFAULT_ZOOM = 2
+const SPEED = 150
+export interface WorldSpec {
+  /** já filtrada por src/auth/permissions.ts antes de chegar aqui */
+  rooms: RoomDef[]
+  label: string
 }
-
+interface RoomView {
+  placement: RoomPlacement
+  zone: Phaser.GameObjects.Zone
+  outline: Phaser.GameObjects.Graphics
+  signPrimary: Phaser.GameObjects.Text
+  signAlert: Phaser.GameObjects.Text
+}
 export class OfficeScene extends Phaser.Scene {
+  private spec: WorldSpec = { rooms: [], label: '' }
+  private plan!: FloorPlan
   private player!: Phaser.Physics.Arcade.Sprite
-  private keys!: Record<string, Phaser.Input.Keyboard.Key>
+  private keys?: Record<string, Phaser.Input.Keyboard.Key>
   private solids!: Phaser.Physics.Arcade.StaticGroup
-  private deskViews = new Map<string, DeskView>()
-  private selection!: Phaser.GameObjects.Graphics
+  private roomViews = new Map<RoomId, RoomView>()
   private zoomIndex = DEFAULT_ZOOM
-  private mode: 'follow' | 'overview' = 'follow'
+  private cameraMode: 'follow' | 'overview' = 'follow'
   private facing: HeroDir = 'down'
   private currentRoom: RoomId | null = null
-  private selectedDeskId: string | null = null
+  private highlighted: RoomId | null = null
   private unsubscribe: (() => void)[] = []
   private torndown = false
-
   constructor() {
     super('office')
   }
-
+  init(data: WorldSpec): void {
+    this.spec = data?.rooms?.length ? data : this.spec
+    this.torndown = false
+    this.roomViews.clear()
+  }
   create(): void {
-    const grid = buildTileGrid()
-    buildTextures(this, grid)
-
+    if (!this.spec.rooms.length) return
+    dropPlanTextures(this)
+    this.plan = buildFloorPlan(this.spec.rooms)
+    buildTextures(this, this.plan)
     this.cameras.main.setBackgroundColor(PALETTE.exterior)
-
-    const map = this.make.tilemap({ data: grid, tileWidth: TILE, tileHeight: TILE })
+    const map = this.make.tilemap({
+      data: this.plan.grid,
+      tileWidth: TILE,
+      tileHeight: TILE,
+    })
     const tileset = map.addTilesetImage(TEX.tileset, TEX.tileset, TILE, TILE, 0, 0)
     if (!tileset) throw new Error('tileset não pôde ser registrado')
     const floor = map.createLayer(0, tileset, 0, 0)
     if (!floor) throw new Error('camada de piso não pôde ser criada')
     floor.setCollision(SOLID_TILES)
     floor.setDepth(0)
-
     this.add.image(0, 0, TEX.overlay).setOrigin(0, 0).setDepth(1)
-
     this.solids = this.physics.add.staticGroup()
-
-    this.buildRoomLabels()
-    this.buildDecor()
-    this.buildDesks()
-
-    this.selection = this.add.graphics().setDepth(9)
-
+    this.buildFurniture()
+    this.buildRooms()
     this.buildPlayer()
     this.physics.add.collider(this.player, floor)
     this.physics.add.collider(this.player, this.solids)
-
     this.setupCamera()
     this.setupInput()
     this.setupBus()
-
+    bus.emit('scene:ready', { rooms: this.spec.rooms.map((room) => room.id) })
     this.emitCameraState()
   }
-
   // ------------------------------------------------------------- construção
-
-  private buildRoomLabels(): void {
-    for (const room of ROOMS) {
-      const x = (room.rect.x + room.rect.w / 2) * TILE
-      const y = (room.rect.y + 1.5) * TILE
-      this.add
-        .text(x, y, room.name.toUpperCase(), {
-          fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace',
-          fontSize: '13px',
-          color: '#f6f3ec',
-        })
-        .setOrigin(0.5)
-        .setResolution(2)
-        .setShadow(0, 1, 'rgba(11,14,19,0.65)', 2)
-        .setDepth(2)
-    }
-  }
-
-  private buildDecor(): void {
-    for (const decor of DECOR) {
-      const x = decor.x * TILE
-      const y = decor.y * TILE
-      let image: Phaser.GameObjects.Image
-
-      if (decor.kind === 'plant') {
-        // A textura da planta é mais alta que um tile, então o vaso fica
-        // alinhado ao tile e a folhagem invade o tile de cima.
-        image = this.add.image(x, y + TILE, TEX.plant).setOrigin(0, 1)
-      } else if (decor.kind === 'sofa') {
-        image = this.add.image(x, y, TEX.sofa(decor.accent ?? PALETTE.sofaBase)).setOrigin(0, 0)
-      } else if (decor.kind === 'counter') {
-        image = this.add.image(x, y, TEX.counter(decor.accent ?? PALETTE.deskTop)).setOrigin(0, 0)
-      } else {
-        image = this.add.image(x, y, TEX.board(decor.accent ?? PALETTE.deskTop)).setOrigin(0, 0)
-      }
-
-      image.setDepth(10 + y + TILE)
-
-      if (decor.solid) this.addSolid(x, y, decor.w * TILE, decor.h * TILE)
-    }
-  }
-
-  /** Corpo estático sem sprite, para mobiliário que bloqueia o caminho. */
   private addSolid(x: number, y: number, w: number, h: number): void {
     const zone = this.add.zone(x + w / 2, y + h / 2, w, h)
     this.solids.add(zone)
     const body = zone.body as Phaser.Physics.Arcade.StaticBody | null
     body?.setSize(w, h)
   }
-
-  private buildDesks(): void {
-    for (const def of DESKS) {
-      const x = def.x * TILE
-      const y = def.y * TILE
-      const deskH = def.h * TILE
-      const deskW = def.w * TILE
-
-      for (const chair of def.chairs) {
-        this.add
-          .image(chair.x * TILE, chair.y * TILE, TEX.chair)
-          .setOrigin(0, 0)
-          .setDepth(10 + chair.y * TILE)
-      }
-
-      const body = this.physics.add.staticImage(x, y, TEX.desk(def.id)).setOrigin(0, 0)
-      body.refreshBody()
-      body.setDepth(10 + y + deskH)
-      body.setInteractive({ useHandCursor: true })
-      body.on('pointerover', () => body.setTint(0xd8e2f0))
-      body.on('pointerout', () => body.clearTint())
-      body.on('pointerdown', () => bus.emit('desk:click', def.id))
-
-      const papers: Phaser.GameObjects.Image[] = []
-      for (let i = 0; i < MAX_PAPERS; i += 1) {
-        const slot = paperSlot(i, deskH)
-        const paper = this.add
-          .image(x + slot.x, y + slot.y, TEX.paper)
-          .setOrigin(0, 0)
-          .setDepth(11 + y + deskH)
-          .setVisible(false)
-        papers.push(paper)
-      }
-
-      const extra = this.add
-        .text(x + 7, y + deskH - 44, '', {
-          fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
-          fontSize: '11px',
-          color: '#2b313c',
-        })
+  private buildFurniture(): void {
+    const accentByRoom = new Map(this.plan.rooms.map((p) => [p.room.id, p.room.accent]))
+    for (const desk of this.plan.desks) {
+      const x = desk.x * TILE
+      const y = desk.y * TILE
+      const accent = accentByRoom.get(desk.roomId) ?? PALETTE.deskTop
+      this.add
+        .image(desk.chair.x * TILE, desk.chair.y * TILE, TEX.chair)
         .setOrigin(0, 0)
-        .setResolution(2)
-        .setDepth(11 + y + deskH)
-        .setVisible(false)
-
-      const mSlot = markerSlot(deskW)
-      const marker = this.add
-        .image(x + mSlot.x, y + mSlot.y, TEX.marker)
+        .setDepth(10 + desk.chair.y * TILE)
+      this.add
+        .image(x, y, TEX.desk(accent))
         .setOrigin(0, 0)
-        .setDepth(12 + y + deskH)
-        .setVisible(false)
-
-      this.tweens.add({
-        targets: marker,
-        alpha: { from: 1, to: 0.35 },
-        duration: 780,
-        yoyo: true,
-        repeat: -1,
-      })
-
-      this.deskViews.set(def.id, { def, body, papers, extra, marker })
+        .setDepth(10 + y + desk.h * TILE)
+      this.addSolid(x, y, desk.w * TILE, desk.h * TILE)
+    }
+    for (const decor of this.plan.decor) {
+      const x = decor.x * TILE
+      const y = decor.y * TILE
+      this.add
+        .image(x, y + TILE, TEX.plant)
+        .setOrigin(0, 1)
+        .setDepth(10 + y + TILE)
+      this.addSolid(x + TILE * 0.2, y + TILE * 0.3, TILE * 0.6, TILE * 0.7)
     }
   }
-
+  /**
+   * Cada sala ganha uma área clicável do tamanho do interior e uma placa.
+   * Sala que não veio em spec.rooms não tem nada disso.
+   */
+  private buildRooms(): void {
+    for (const placement of this.plan.rooms) {
+      const { rect, room, sign } = placement
+      const ix = (rect.x + 1) * TILE
+      const iy = (rect.y + 1) * TILE
+      const iw = (rect.w - 2) * TILE
+      const ih = (rect.h - 2) * TILE
+      const outline = this.add.graphics().setDepth(2)
+      const zone = this.add.zone(ix, iy, iw, ih).setOrigin(0, 0)
+      zone.setInteractive({ useHandCursor: true })
+      zone.on('pointerover', () => this.drawOutline(outline, placement, 0.85))
+      zone.on('pointerout', () => {
+        if (this.highlighted === room.id) this.drawOutline(outline, placement, 0.5)
+        else outline.clear()
+      })
+      zone.on('pointerdown', () => bus.emit('room:open', room.id))
+      const signX = sign.x * TILE
+      const signY = (sign.y + 1) * TILE - 2
+      this.add
+        .image(signX, signY, TEX.sign(room.accent))
+        .setOrigin(0.5, 1)
+        .setDepth(3)
+      const signPrimary = this.add
+        .text(signX, signY - SIGN_H + 8, room.name.toUpperCase(), {
+          fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace',
+          fontSize: '11px',
+          color: '#f2f5fa',
+        })
+        .setOrigin(0.5, 0)
+        .setResolution(2)
+        .setDepth(4)
+      const signAlert = this.add
+        .text(signX, signY - SIGN_H + 21, '', {
+          fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+          fontSize: '9px',
+          color: '#b9c6d8',
+        })
+        .setOrigin(0.5, 0)
+        .setResolution(2)
+        .setDepth(4)
+      this.roomViews.set(room.id, { placement, zone, outline, signPrimary, signAlert })
+    }
+  }
+  private drawOutline(
+    graphics: Phaser.GameObjects.Graphics,
+    placement: RoomPlacement,
+    alpha: number,
+  ): void {
+    const { rect, room } = placement
+    graphics.clear()
+    graphics.lineStyle(2, toNum(room.accent), alpha)
+    graphics.strokeRect(
+      (rect.x + 1) * TILE + 1,
+      (rect.y + 1) * TILE + 1,
+      (rect.w - 2) * TILE - 2,
+      (rect.h - 2) * TILE - 2,
+    )
+  }
   private buildPlayer(): void {
     this.player = this.physics.add.sprite(
-      SPAWN.x * TILE + TILE / 2,
-      SPAWN.y * TILE + TILE / 2,
+      this.plan.spawn.x * TILE + TILE / 2,
+      this.plan.spawn.y * TILE + TILE / 2,
       TEX.hero('down', 0),
     )
     this.player.setOrigin(0.5, 0.8)
-    this.player.setSize(14, 10)
+    this.player.setSize(12, 8)
     this.player.setOffset(5, 21)
     this.player.setCollideWorldBounds(true)
     this.player.setDepth(10 + this.player.y)
-
     for (const dir of HERO_DIRS) {
+      if (this.anims.exists(`walk-${dir}`)) continue
       this.anims.create({
         key: `walk-${dir}`,
         frames: [{ key: TEX.hero(dir, 0) }, { key: TEX.hero(dir, 1) }],
@@ -226,36 +201,32 @@ export class OfficeScene extends Phaser.Scene {
       })
     }
   }
-
   private setupCamera(): void {
     const cam = this.cameras.main
-    this.physics.world.setBounds(0, 0, MAP_W, MAP_H)
-    cam.setBounds(0, 0, MAP_W, MAP_H)
+    this.physics.world.setBounds(0, 0, this.plan.width, this.plan.height)
+    cam.setBounds(0, 0, this.plan.width, this.plan.height)
     cam.setZoom(ZOOM_STEPS[this.zoomIndex])
-    cam.startFollow(this.player, true, 0.12, 0.12)
+    cam.startFollow(this.player, true, 0.14, 0.14)
     cam.setRoundPixels(true)
   }
-
   private setupInput(): void {
     const keyboard = this.input.keyboard
     if (!keyboard) return
-    keyboard.addCapture('UP,DOWN,LEFT,RIGHT,SPACE')
+    keyboard.addCapture('UP,DOWN,LEFT,RIGHT')
     this.keys = keyboard.addKeys('W,A,S,D,UP,LEFT,DOWN,RIGHT') as Record<
       string,
       Phaser.Input.Keyboard.Key
     >
   }
-
   private setupBus(): void {
     this.unsubscribe.push(
-      bus.on('desks:update', (summaries) => this.applySummaries(summaries)),
-      bus.on('desk:selected', (deskId) => this.drawSelection(deskId)),
+      bus.on('rooms:badges', (badges) => this.applyBadges(badges)),
+      bus.on('room:highlight', (roomId) => this.applyHighlight(roomId)),
+      bus.on('room:goto', (roomId) => this.gotoRoom(roomId)),
       bus.on('camera:command', (command) => this.runCameraCommand(command)),
     )
-
     // game.destroy() emite DESTROY, e não SHUTDOWN. Sem ouvir os dois, a cena
-    // descartada pelo StrictMode continuaria assinada no bus e quebraria os
-    // comandos da cena viva.
+    // descartada continuaria assinada no bus e quebraria a cena viva.
     const release = () => {
       this.torndown = true
       this.unsubscribe.forEach((off) => off())
@@ -264,131 +235,103 @@ export class OfficeScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, release)
     this.events.once(Phaser.Scenes.Events.DESTROY, release)
   }
-
   // ------------------------------------------------------------- estado
-
-  private applySummaries(summaries: DeskSummary[]): void {
+  private applyBadges(badges: bus.BusEvents['rooms:badges']): void {
     if (this.torndown) return
-    const byDesk = new Map(summaries.map((s) => [s.deskId, s]))
-
-    for (const [deskId, view] of this.deskViews) {
-      const summary = byDesk.get(deskId)
-      const total = summary?.total ?? 0
-      const statuses = summary?.statuses ?? []
-
-      view.papers.forEach((paper, index) => {
-        const status = statuses[index]
-        if (!status) {
-          paper.setVisible(false)
-          return
-        }
-        paper.setVisible(true)
-        paper.setTint(toNum(STATUS_COLOR[status]))
-      })
-
-      const hidden = total - MAX_PAPERS
-      view.extra.setVisible(hidden > 0)
-      if (hidden > 0) view.extra.setText(`+${hidden}`)
-
-      view.marker.setVisible((summary?.overdue ?? 0) > 0)
-      view.body.setAlpha(total === 0 ? 0.78 : 1)
+    for (const badge of badges) {
+      const view = this.roomViews.get(badge.roomId)
+      if (!view) continue
+      view.signPrimary.setText(view.placement.room.name.toUpperCase())
+      view.signAlert.setText(
+        badge.alert ? `${badge.primary}  ·  ${badge.alert}` : badge.primary,
+      )
+      view.signAlert.setColor(badge.health === 'late' ? '#f0938b' : '#b9c6d8')
     }
-
-    if (this.selectedDeskId) this.drawSelection(this.selectedDeskId)
   }
-
-  private drawSelection(deskId: string | null): void {
+  private applyHighlight(roomId: RoomId | null): void {
     if (this.torndown) return
-    this.selectedDeskId = deskId
-    this.selection.clear()
-    if (!deskId) return
-    const view = this.deskViews.get(deskId)
-    if (!view) return
-
-    const room = ROOMS.find((r) => r.id === view.def.roomId)
-    const color = toNum(room?.accent ?? '#ffffff')
-    const x = view.def.x * TILE - 3
-    const y = view.def.y * TILE - 3
-    const w = view.def.w * TILE + 6
-    const h = view.def.h * TILE + 6
-
-    this.selection.lineStyle(2, 0xffffff, 0.9)
-    this.selection.strokeRect(x, y, w, h)
-    this.selection.lineStyle(4, color, 0.55)
-    this.selection.strokeRect(x - 2, y - 2, w + 4, h + 4)
+    this.highlighted = roomId
+    for (const [id, view] of this.roomViews) {
+      if (id === roomId) this.drawOutline(view.outline, view.placement, 0.5)
+      else view.outline.clear()
+    }
   }
-
+  /** Teleporte com transição curta: apaga, reposiciona, acende. */
+  private gotoRoom(roomId: RoomId): void {
+    if (this.torndown) return
+    const view = this.roomViews.get(roomId)
+    if (!view) return
+    const target = view.placement.entry
+    const cam = this.cameras.main
+    cam.fadeOut(140, 11, 14, 19)
+    cam.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      if (this.torndown) return
+      this.player.setVelocity(0, 0)
+      this.player.setPosition(target.x * TILE + TILE / 2, target.y * TILE + TILE / 2)
+      this.player.setDepth(10 + this.player.y)
+      this.resumeFollow()
+      cam.centerOn(this.player.x, this.player.y)
+      cam.fadeIn(180, 11, 14, 19)
+    })
+  }
   private runCameraCommand(command: bus.CameraCommand): void {
     if (this.torndown) return
     const cam = this.cameras.main
-
     if (command === 'overview') {
-      this.mode = 'overview'
+      this.cameraMode = 'overview'
       cam.stopFollow()
-      const fit = Math.min(cam.width / MAP_W, cam.height / MAP_H) * 0.97
-      cam.zoomTo(fit, 420, 'Sine.easeInOut')
-      cam.pan(MAP_W / 2, MAP_H / 2, 420, 'Sine.easeInOut')
+      const fit = Math.min(cam.width / this.plan.width, cam.height / this.plan.height) * 0.96
+      cam.zoomTo(fit, 400, 'Sine.easeInOut')
+      cam.pan(this.plan.width / 2, this.plan.height / 2, 400, 'Sine.easeInOut')
       this.emitCameraState(fit)
       return
     }
-
     if (command === 'follow') {
       this.resumeFollow()
       return
     }
-
     const step = command === 'zoom-in' ? 1 : -1
     this.zoomIndex = Phaser.Math.Clamp(this.zoomIndex + step, 0, ZOOM_STEPS.length - 1)
-    if (this.mode === 'overview') {
+    if (this.cameraMode === 'overview') {
       this.resumeFollow()
       return
     }
     cam.zoomTo(ZOOM_STEPS[this.zoomIndex], 200, 'Sine.easeInOut')
     this.emitCameraState()
   }
-
   private resumeFollow(): void {
     const cam = this.cameras.main
-    this.mode = 'follow'
+    this.cameraMode = 'follow'
     cam.panEffect.reset()
-    cam.startFollow(this.player, true, 0.12, 0.12)
-    cam.zoomTo(ZOOM_STEPS[this.zoomIndex], 300, 'Sine.easeInOut')
+    cam.startFollow(this.player, true, 0.14, 0.14)
+    cam.zoomTo(ZOOM_STEPS[this.zoomIndex], 280, 'Sine.easeInOut')
     this.emitCameraState()
   }
-
   private emitCameraState(zoom?: number): void {
     bus.emit('camera:state', {
       zoom: zoom ?? ZOOM_STEPS[this.zoomIndex],
-      mode: this.mode,
+      mode: this.cameraMode,
     })
   }
-
   // ------------------------------------------------------------- loop
-
   update(): void {
+    if (this.torndown || !this.keys || !this.player) return
     const keys = this.keys
-    if (!keys) return
-
     const left = keys.A.isDown || keys.LEFT.isDown
     const right = keys.D.isDown || keys.RIGHT.isDown
     const up = keys.W.isDown || keys.UP.isDown
     const down = keys.S.isDown || keys.DOWN.isDown
-
     const vector = new Phaser.Math.Vector2(
       (right ? 1 : 0) - (left ? 1 : 0),
       (down ? 1 : 0) - (up ? 1 : 0),
     )
-
     if (vector.lengthSq() > 0) {
       vector.normalize().scale(SPEED)
-      // Mover em visão geral devolve a câmera ao personagem, sem precisar
-      // voltar no botão.
-      if (this.mode === 'overview') this.resumeFollow()
+      if (this.cameraMode === 'overview') this.resumeFollow()
     }
     this.player.setVelocity(vector.x, vector.y)
-
     if (vector.lengthSq() > 0) {
-      const nextFacing: HeroDir =
+      const facing: HeroDir =
         Math.abs(vector.x) > Math.abs(vector.y)
           ? vector.x > 0
             ? 'right'
@@ -396,17 +339,15 @@ export class OfficeScene extends Phaser.Scene {
           : vector.y > 0
             ? 'down'
             : 'up'
-      this.facing = nextFacing
-      this.player.anims.play(`walk-${nextFacing}`, true)
+      this.facing = facing
+      this.player.anims.play(`walk-${facing}`, true)
     } else {
       this.player.anims.stop()
       this.player.setTexture(TEX.hero(this.facing, 0))
     }
-
     this.player.setDepth(10 + this.player.y)
-
-    const room = roomAtPixel(this.player.x, this.player.y)
-    const roomId = room?.id ?? null
+    const room = roomAtPixel(this.plan, this.player.x, this.player.y)
+    const roomId = room?.room.id ?? null
     if (roomId !== this.currentRoom) {
       this.currentRoom = roomId
       bus.emit('room:enter', roomId)

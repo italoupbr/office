@@ -1,14 +1,15 @@
 import { useEffect, useRef } from 'react'
 import Phaser from 'phaser'
-import { OfficeScene } from './OfficeScene'
+import { OfficeScene, type WorldSpec } from './OfficeScene'
 import { PALETTE } from './palette'
 
 /**
- * Monta e destrói a instância do Phaser. A comunicação com a interface passa
- * só pelo bus, então este componente não recebe nem devolve dados de negócio.
+ * Ponte com o Phaser. Recebe a planta já filtrada por permissões: o que não
+ * está em world.rooms não chega à cena e portanto não existe no mapa.
  */
-export default function PhaserGame() {
+export default function PhaserGame({ world }: { world: WorldSpec }) {
   const hostRef = useRef<HTMLDivElement>(null)
+  const gameRef = useRef<Phaser.Game | null>(null)
 
   useEffect(() => {
     const parent = hostRef.current
@@ -33,13 +34,28 @@ export default function PhaserGame() {
         default: 'arcade',
         arcade: { gravity: { x: 0, y: 0 }, debug: false },
       },
-      scene: [OfficeScene],
     })
+    gameRef.current = game
 
     return () => {
+      gameRef.current = null
       game.destroy(true)
     }
   }, [])
+
+  useEffect(() => {
+    const game = gameRef.current
+    if (!game || !world.rooms.length) return
+
+    const apply = () => {
+      const existing = game.scene.getScene('office')
+      if (existing) existing.scene.restart(world)
+      else game.scene.add('office', OfficeScene, true, world)
+    }
+
+    if (game.isBooted) apply()
+    else game.events.once(Phaser.Core.Events.READY, apply)
+  }, [world])
 
   return <div className="game-host" ref={hostRef} />
 }
